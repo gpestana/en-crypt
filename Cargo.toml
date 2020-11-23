@@ -1,0 +1,9 @@
+[package]
+name = "en-crypt"
+version = "0.1.0"
+authors = ["gpestana <g6pestana@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+clap = "~2.27.0"
+aes-gcm = "0.8.0"
