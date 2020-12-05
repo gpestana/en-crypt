@@ -1,52 +1,87 @@
-use std::collections::HashMap;
+const BLOCK_SIZE: usize = 256 * 8; // 256 bytes
 
-use aes_gcm::aead::{generic_array::GenericArray, Aead, NewAead};
-use aes_gcm::Aes256Gcm;
-
+#[derive(Clone, Debug)]
 struct Wrapper {
-    pub proto: HashMap<String, Vec<u8>>,
-    pub enc_metadata: Vec<u8>,
-    pub metadata_digest: Vec<u8>,
-    pub digest: Vec<u8>,
-    pub next: Vec<u8>,
+    pub cid: String,
+    pub metadata: Box<[u8]>,
+    pub head_block: String, // cid for first block
+    pub blocks: Vec<Block>,
 }
 
+#[derive(Clone, Debug)]
 struct Block {
-    pub block_digest: Vec<u8>,
-    pub data: Vec<u8>,
-    pub next: Vec<u8>,
+    pub cid: String,
+    pub digest: Box<[u8]>,
+    pub next: String,
+    pub data: Box<[u8]>,
 }
 
-pub struct EncryptedFile(Wrapper);
+impl Block {
+    pub fn into_raw(&self) -> &[u8] {
+        &self.data
+    }
+}
 
-impl EncryptedFile {
-    pub fn from_bytes(buf: &[u8], key: &[u8]) -> Result<Self, String> {
-        let cipher = Aes256Gcm::new(GenericArray::from_slice(key));
+#[derive(Clone, Debug)]
+pub struct Pointer(Wrapper);
 
-        // todo: generate nonce randomly
-        let nonce = GenericArray::from_slice(b"000000000000");
-        let ciphertext = cipher.encrypt(nonce, buf).unwrap();
+impl Pointer {
+    pub fn new(buf: &[u8]) -> Self {
+        let mut blocks = Vec::<Block>::new();
+        let mut chunker = buf.chunks(BLOCK_SIZE);
 
-        let mut proto = HashMap::<String, Vec<u8>>::new();
-        proto.insert("nonce".to_string(), nonce.to_vec());
+        loop {
+            let chunk = match chunker.next() {
+                Some(c) => c,
+                None => break,
+            };
+            let mut data = Vec::new();
+            data.extend_from_slice(&chunk);
 
-        // todo: replace stub values
-        let head = Wrapper {
-            proto: proto,
-            enc_metadata: ciphertext, // todo: ciphertext should be in block
-            metadata_digest: Vec::<u8>::new(),
-            digest: Vec::<u8>::new(),
-            next: Vec::<u8>::new(),
+            let block = Block {
+                cid: "".to_string(),
+                digest: Box::new([0]),
+                next: "".to_string(),
+                data: Box::new([12, 12, 3, 1]),
+            };
+
+            blocks.push(block);
+        }
+
+        let wrapper = Wrapper {
+            cid: "wrapper_cid".to_string(),
+            metadata: Box::new([0]),
+            head_block: "".to_string(),
+            blocks,
         };
 
-        return Ok(EncryptedFile { 0: head });
+        Pointer { 0: wrapper }
     }
 
-    pub fn decrypt(&self, key: &[u8]) -> Result<Vec<u8>, String> {
-        let cipher = Aes256Gcm::new(GenericArray::from_slice(key));
-        let nonce = GenericArray::from_slice(self.0.proto.get("nonce").unwrap());
-        let plaintext = cipher.decrypt(nonce, self.0.enc_metadata.as_ref()).unwrap();
+    pub fn raw_data(&self) -> &Box<[u8]> {
+        // TODO: wrap data from all boxes in pointer
+        &self.0.blocks[0].data
+    }
 
-        Ok(plaintext)
+    pub fn metadata(&self) -> &[u8] {
+        &self.0.metadata
+    }
+
+    pub fn cid(&self) -> &str {
+        &self.0.cid
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constructor() {
+        let p = Pointer::new(&[1, 2, 3]);
+        assert_eq!(p.cid(), "wrapper_cid");
+
+        let expected: Box<[u8]> = Box::new([12, 12, 3, 1]);
+        assert_eq!(*p.raw_data(), expected);
     }
 }
