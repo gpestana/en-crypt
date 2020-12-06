@@ -1,10 +1,12 @@
+use std::io::{ Read, Write };
+
 const BLOCK_SIZE: usize = 256 * 8; // 256 bytes
 
 #[derive(Clone, Debug)]
 struct Wrapper {
     pub cid: String,
     pub metadata: Box<[u8]>,
-    pub head_block: String, // cid for first block
+    pub head_block: Option<String>, // cid for first block
     pub blocks: Vec<Block>,
 }
 
@@ -12,13 +14,50 @@ struct Wrapper {
 struct Block {
     pub cid: String,
     pub digest: Box<[u8]>,
-    pub next: String,
+    pub next: Option<String>,
     pub data: Box<[u8]>,
 }
 
 impl Block {
     pub fn into_raw(&self) -> &[u8] {
         &self.data
+    }
+
+    pub fn new_empty() -> Self {
+        Block{
+            cid: "".to_string(),
+            digest: Box::new([]),
+            next: None,
+            data: Box::new([]),
+        }
+    }
+}
+
+impl Read for Block {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error> {
+        self.data.as_ref().read(buf)
+    }
+
+    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> Result<usize, std::io::Error> {
+        self.data.as_ref().read_to_end(buf)
+    }
+}
+
+impl Write for Block {
+    fn write(&mut self, buf: &[u8]) -> std::result::Result<usize, std::io::Error> {
+        if buf.len() > BLOCK_SIZE {
+            return Err(std::io::Error::new(std::io::ErrorKind::Other,
+                format!("Data too large to store by a single block. Max {:?} bytes", BLOCK_SIZE)));
+        }
+        let mut new_data: [u8; BLOCK_SIZE] = [0; BLOCK_SIZE];
+        new_data[..buf.len()].clone_from_slice(buf);
+        self.data = Box::new(new_data);
+        Ok(self.data.len())
+    }
+
+    fn flush(&mut self) -> std::result::Result<(), std::io::Error> {
+        self.data = Box::new([]);
+        Ok(())
     }
 }
 
@@ -41,8 +80,8 @@ impl Pointer {
             let block = Block {
                 cid: "".to_string(),
                 digest: Box::new([0]),
-                next: "".to_string(),
-                data: Box::new([12, 12, 3, 1]),
+                next: None,
+                data: Box::new([12, 12, 3, 1]), // TODO consume data
             };
 
             blocks.push(block);
@@ -51,16 +90,11 @@ impl Pointer {
         let wrapper = Wrapper {
             cid: "wrapper_cid".to_string(),
             metadata: Box::new([0]),
-            head_block: "".to_string(),
+            head_block: Some("".to_string()),
             blocks,
         };
 
         Pointer { 0: wrapper }
-    }
-
-    pub fn raw_data(&self) -> &Box<[u8]> {
-        // TODO: wrap data from all boxes in pointer
-        &self.0.blocks[0].data
     }
 
     pub fn metadata(&self) -> &[u8] {
@@ -80,8 +114,35 @@ mod tests {
     fn constructor() {
         let p = Pointer::new(&[1, 2, 3]);
         assert_eq!(p.cid(), "wrapper_cid");
+    }
 
-        let expected: Box<[u8]> = Box::new([12, 12, 3, 1]);
-        assert_eq!(*p.raw_data(), expected);
+    #[test]
+    fn block_writer_reader() {
+        // empty block
+        let mut dst = Vec::<u8>::new();
+        let mut b = Block::new_empty();
+        let res = b.read(&mut dst);
+        assert!(res.is_ok(), "Error reading from block");
+        assert_eq!(res.unwrap(), 0);
+        assert_eq!(dst.to_vec(), Vec::<u8>::new());
+
+        // write to block using Writer interface
+        let src = [1, 2, 3, 4];
+        let res = b.write(&src);
+        
+        let mut dst = Vec::from([0; 3]);
+        let res = b.read(&mut dst);
+        assert!(res.is_ok(), "Error reading from block");
+        assert_eq!(res.unwrap(), 3);
+        assert_eq!(dst.to_vec(), Vec::from([1, 2, 3]));
+
+        let mut dst = Vec::new();
+        let res = b.read_to_end(&mut dst);
+        assert!(res.is_ok(), "Error reading from block");
+        assert_eq!(res.unwrap(), BLOCK_SIZE);
+        assert_eq!(dst[0], src[0]);
+        assert_eq!(dst[1], src[1]);
+        assert_eq!(dst[2], src[2]);
+        assert_eq!(dst[3], src[3]);
     }
 }
