@@ -7,3 +7,5 @@ edition = "2018"
 [dependencies]
 clap = "~2.27.0"
 aes-gcm = "0.8.0"
+cid = "*"
+multihash = "*"
