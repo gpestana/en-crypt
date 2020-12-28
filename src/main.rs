@@ -38,7 +38,7 @@ fn main() {
     if let Some(matches) = matches.subcommand_matches("store") {
         if matches.is_present("file") {
             let file_path = matches.value_of("file").unwrap();
-            let config = matches.value_of("config").unwrap_or("./config.json");
+            //let config = matches.value_of("config").unwrap_or("./config.json");
 
             match commands::store(file_path) {
                 Ok(_) => println!("File {} stored successfully", file_path),

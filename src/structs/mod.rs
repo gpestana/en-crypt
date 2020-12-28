@@ -3,12 +3,18 @@
 
 use cid::{Cid, Version};
 use multihash::{Code, MultihashDigest};
+use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
+
+use aes_gcm::aead::{generic_array::GenericArray, Aead, NewAead};
+use aes_gcm::Aes256Gcm;
 
 const BLOCK_SIZE: usize = 256 * 8; // 256 bytes
 const SHA256_CODE: u64 = 0x12;
+const NONCE_SIZE_BYTES: usize = 12;
+const ENC_META_SIZE: usize = 16;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct Wrapper {
     pub cid: String,
     pub metadata: Box<[u8]>,
@@ -16,7 +22,7 @@ struct Wrapper {
     pub blocks: Vec<Block>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct Block {
     pub cid: String,
     pub next: Option<String>,
@@ -33,6 +39,43 @@ impl Block {
             cid: "".to_string(),
             next: None,
             data: Box::new([]),
+        }
+    }
+
+    pub fn encrypt(self, key: &[u8; 32]) -> Block {
+        let nonce = GenericArray::from_slice(&self.cid.as_bytes()[0..NONCE_SIZE_BYTES]);
+        let k = GenericArray::from_slice(key);
+        let cipher = Aes256Gcm::new(k);
+
+        let ctext = cipher.encrypt(nonce, self.data.as_ref()).unwrap();
+
+        let mut enc_data: [u8; BLOCK_SIZE + ENC_META_SIZE] = [0; BLOCK_SIZE + ENC_META_SIZE];
+        enc_data[..ctext.len()].clone_from_slice(&ctext.as_slice());
+
+        Block {
+            cid: self.cid + "/encrypted",
+            next: self.next,
+            data: Box::new(enc_data),
+        }
+    }
+
+    pub fn decrypt(self, key: &[u8; 32]) -> Block {
+        let cid_split: Vec<&str> = self.cid.split('/').collect();
+        let cid = cid_split[0].to_string();
+
+        let nonce = GenericArray::from_slice(&cid.as_bytes()[0..NONCE_SIZE_BYTES]);
+        let key = GenericArray::from_slice(key);
+        let cipher = Aes256Gcm::new(key);
+
+        let ptext = cipher.decrypt(nonce, self.data.as_ref()).unwrap();
+
+        let mut data: [u8; BLOCK_SIZE] = [0; BLOCK_SIZE];
+        data[..ptext.len()].clone_from_slice(&ptext.as_slice());
+
+        Block {
+            cid: cid,
+            next: self.next,
+            data: Box::new(data),
         }
     }
 }
@@ -78,7 +121,7 @@ impl Write for Block {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Pointer(Wrapper);
 
 impl Pointer {
@@ -155,6 +198,19 @@ mod tests {
     }
 
     #[test]
+    fn serialization() {
+        use serde_cbor::de;
+
+        let synthetic_data = [1_u8; BLOCK_SIZE + 1];
+        let p = Pointer::from(&synthetic_data).unwrap();
+        let serial_p = serde_cbor::to_vec(&p).unwrap();
+        let p_deser: Pointer = de::from_slice(&serial_p).unwrap();
+
+        assert_eq!(p.cid(), p_deser.cid());
+        assert_eq!(p.blocks_len(), p_deser.blocks_len());
+    }
+
+    #[test]
     fn block_writer_reader() {
         // empty block
         let mut dst = Vec::<u8>::new();
@@ -186,5 +242,26 @@ mod tests {
         assert_eq!(dst[1], src[1]);
         assert_eq!(dst[2], src[2]);
         assert_eq!(dst[3], src[3]);
+    }
+
+    #[test]
+    fn block_encrypt_decrypt() {
+        let mut original_block = Block::new_empty();
+        let src = [1, 2, 3, 4];
+        let expected_block_cid =
+            "baejbeibd5xwwexac5cnvy2gwjzelt67k5ldp7fnwlpw4ctqn3iyloz23ri".to_string();
+        let res = original_block.write(&src);
+        assert!(res.is_ok(), "Error creating block");
+        assert_eq!(original_block.cid, expected_block_cid);
+
+        // encrypts content
+        let key = b"an example very very secret key.";
+        let enc_b = original_block.clone().encrypt(key);
+        assert_eq!(enc_b.cid, expected_block_cid + "/encrypted");
+
+        // decrypts encrypted block
+        let dec_b = enc_b.clone().decrypt(key);
+        assert_eq!(original_block.cid, dec_b.cid);
+        assert_eq!(original_block.data, dec_b.data);
     }
 }

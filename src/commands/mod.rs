@@ -1,5 +1,3 @@
-use crate::structs::Pointer;
-
 use std::fs::File;
 use std::io::Read;
 
@@ -13,9 +11,6 @@ pub fn store(file_path: &str) -> Result<(), String> {
     if let Err(err) = f.read_to_end(&mut buf) {
         return Err(format!("Error reading file: {}", err));
     };
-
-    //let p = Pointer::new(&buf);
-    //println!("{:?}", p);
 
     Ok(())
 }

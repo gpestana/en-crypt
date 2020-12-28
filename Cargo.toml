@@ -9,3 +9,6 @@ clap = "~2.27.0"
 aes-gcm = "0.8.0"
 cid = "*"
 multihash = "*"
+serde_cbor = "0.10"
+serde = { version = "1.0", features = ["derive"] }
+
