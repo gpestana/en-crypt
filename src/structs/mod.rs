@@ -22,6 +22,25 @@ struct Wrapper {
     pub blocks: Vec<Block>,
 }
 
+impl Read for Wrapper {
+    fn read(&mut self, _buf: &mut [u8]) -> Result<usize, std::io::Error> {
+        unimplemented!();
+    }
+
+    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> Result<usize, std::io::Error> {
+        let mut count_bytes: usize = 0;
+
+        for block in &self.blocks {
+            let mut tmp_buf = [0; BLOCK_SIZE]; 
+            let bytes = block.data.as_ref().read(&mut tmp_buf).unwrap();
+            buf.extend_from_slice(&tmp_buf);
+            count_bytes += bytes;
+        };
+
+        Ok(count_bytes)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Block {
     pub cid: String,
@@ -124,6 +143,16 @@ impl Write for Block {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Pointer(Wrapper);
 
+impl Read for Pointer {
+    fn read(&mut self, _buf: &mut [u8]) -> Result<usize, std::io::Error> {
+        unimplemented!();
+    }
+
+    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> Result<usize, std::io::Error> {
+        self.0.read_to_end(buf)
+    }
+}
+
 impl Pointer {
     pub fn from(buf: &[u8]) -> Result<Self, cid::Error> {
         let mut chunker = buf.chunks(BLOCK_SIZE);
@@ -195,6 +224,24 @@ mod tests {
         let p = Pointer::from(&synthetic_data).unwrap();
         assert_eq!(p.cid(), expected_ptr_cid);
         assert_eq!(p.blocks_len(), 2);
+    }
+
+    #[test]
+    fn pointer_read() {
+        let synthetic_data = [1_u8; BLOCK_SIZE + 1];
+        let expected_ptr_cid =
+            "baejbeidzs6e7xnrm3oec43pkmblr6ypq6rkxyjnjxdut5d5m2voxraakca".to_string();
+        let expected_total_bytes = BLOCK_SIZE * 2;
+
+        let mut p = Pointer::from(&synthetic_data).unwrap();
+        assert_eq!(p.cid(), expected_ptr_cid);
+        assert_eq!(p.blocks_len(), 2);
+        
+        let mut dst_vec: Vec<u8> = vec![];
+        let bytes = p.read_to_end(&mut dst_vec).unwrap();
+        
+        assert_eq!(bytes, expected_total_bytes);
+        assert_eq!(dst_vec.len(), expected_total_bytes);
     }
 
     #[test]
