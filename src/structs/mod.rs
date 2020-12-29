@@ -12,7 +12,6 @@ use aes_gcm::Aes256Gcm;
 const BLOCK_SIZE: usize = 256 * 8; // 256 bytes
 const SHA256_CODE: u64 = 0x12;
 const NONCE_SIZE_BYTES: usize = 12;
-const ENC_META_SIZE: usize = 16;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Wrapper {
@@ -31,11 +30,11 @@ impl Read for Wrapper {
         let mut count_bytes: usize = 0;
 
         for block in &self.blocks {
-            let mut tmp_buf = [0; BLOCK_SIZE]; 
-            let bytes = block.data.as_ref().read(&mut tmp_buf).unwrap();
-            buf.extend_from_slice(&tmp_buf);
+            let mut tmp_buf: Vec<u8> = vec![];
+            let bytes = block.data.as_ref().read_to_end(&mut tmp_buf).unwrap();
+            buf.extend_from_slice(tmp_buf.as_slice());
             count_bytes += bytes;
-        };
+        }
 
         Ok(count_bytes)
     }
@@ -68,13 +67,13 @@ impl Block {
 
         let ctext = cipher.encrypt(nonce, self.data.as_ref()).unwrap();
 
-        let mut enc_data: [u8; BLOCK_SIZE + ENC_META_SIZE] = [0; BLOCK_SIZE + ENC_META_SIZE];
-        enc_data[..ctext.len()].clone_from_slice(&ctext.as_slice());
+        let mut enc_data: Vec<u8> = vec![];
+        enc_data.extend_from_slice(&ctext);
 
         Block {
             cid: self.cid + "/encrypted",
             next: self.next,
-            data: Box::new(enc_data),
+            data: enc_data.into_boxed_slice(),
         }
     }
 
@@ -88,13 +87,13 @@ impl Block {
 
         let ptext = cipher.decrypt(nonce, self.data.as_ref()).unwrap();
 
-        let mut data: [u8; BLOCK_SIZE] = [0; BLOCK_SIZE];
-        data[..ptext.len()].clone_from_slice(&ptext.as_slice());
+        let mut data: Vec<u8> = vec![];
+        data.extend_from_slice(&ptext.as_slice());
 
         Block {
             cid: cid,
             next: self.next,
-            data: Box::new(data),
+            data: data.into_boxed_slice(),
         }
     }
 }
@@ -120,16 +119,18 @@ impl Write for Block {
                 ),
             ));
         }
-        let mut new_data: [u8; BLOCK_SIZE] = [0; BLOCK_SIZE];
-        new_data[..buf.len()].clone_from_slice(buf);
-        self.data = Box::new(new_data);
+
+        let mut new_data: Vec<u8> = vec![];
+        new_data.extend_from_slice(&buf);
 
         let h = Code::Sha2_256.digest(&new_data);
         let cid = match Cid::new(Version::V1, SHA256_CODE, h) {
             Ok(c) => c,
             Err(e) => return Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
         };
+
         self.cid = cid.to_string();
+        self.data = new_data.into_boxed_slice();
 
         Ok(self.data.len())
     }
@@ -198,6 +199,72 @@ impl Pointer {
         Ok(Pointer { 0: wrapper })
     }
 
+    pub fn encrypt(self, key: &[u8; 32]) -> Result<Pointer, String> {
+        let nonce = GenericArray::from_slice(&self.0.cid.as_bytes()[0..NONCE_SIZE_BYTES]);
+        let k = GenericArray::from_slice(key);
+        let cipher = Aes256Gcm::new(k);
+
+        let metadata = self.0.metadata.as_ref();
+        let ctext = cipher.encrypt(nonce, metadata).unwrap();
+
+        let mut enc_metadata: Vec<u8> = vec![];
+        enc_metadata.extend_from_slice(&ctext);
+
+        let mut enc_blocks: Vec<Block> = vec![];
+
+        // encrypt blocks
+        for block in self.0.blocks {
+            let enc_block = block.encrypt(key);
+            enc_blocks.push(enc_block);
+        }
+
+        let wrapper = Wrapper {
+            cid: self.0.cid + "/encrypted",
+            head_block: self.0.head_block,
+            metadata: enc_metadata.into_boxed_slice(),
+            blocks: enc_blocks,
+        };
+
+        Ok(Pointer { 0: wrapper })
+    }
+
+    pub fn decrypt(self, key: &[u8; 32]) -> Result<Pointer, String> {
+        let cid_split: Vec<&str> = self.0.cid.split('/').collect();
+        let cid = cid_split[0].to_string();
+
+        let nonce = GenericArray::from_slice(&cid.as_bytes()[0..NONCE_SIZE_BYTES]);
+        let k = GenericArray::from_slice(key);
+        let cipher = Aes256Gcm::new(k);
+
+        let ptext = match cipher.decrypt(nonce, self.0.metadata.as_ref()) {
+            Ok(pt) => pt,
+            Err(e) => {
+                println!("{:?}", e);
+                return Err(e.to_string());
+            }
+        };
+
+        let mut metadata: Vec<u8> = vec![];
+        metadata.extend_from_slice(&ptext.as_slice());
+
+        let mut dec_blocks: Vec<Block> = vec![];
+
+        // decrypt blocks
+        for block in self.0.blocks {
+            let dec_block = block.decrypt(key);
+            dec_blocks.push(dec_block);
+        }
+
+        let wrapper = Wrapper {
+            cid,
+            metadata: metadata.into_boxed_slice(),
+            head_block: self.0.head_block,
+            blocks: dec_blocks,
+        };
+
+        Ok(Pointer { 0: wrapper })
+    }
+
     pub fn metadata(&self) -> &[u8] {
         &self.0.metadata
     }
@@ -219,7 +286,7 @@ mod tests {
     fn pointer_constructor() {
         let synthetic_data = [1_u8; BLOCK_SIZE + 1];
         let expected_ptr_cid =
-            "baejbeidzs6e7xnrm3oec43pkmblr6ypq6rkxyjnjxdut5d5m2voxraakca".to_string();
+            "baejbeidf3xehfzoocgwqaddxr64ggxzuh5yucgzpzhgv772z4ws552kui4".to_string();
 
         let p = Pointer::from(&synthetic_data).unwrap();
         assert_eq!(p.cid(), expected_ptr_cid);
@@ -230,16 +297,16 @@ mod tests {
     fn pointer_read() {
         let synthetic_data = [1_u8; BLOCK_SIZE + 1];
         let expected_ptr_cid =
-            "baejbeidzs6e7xnrm3oec43pkmblr6ypq6rkxyjnjxdut5d5m2voxraakca".to_string();
-        let expected_total_bytes = BLOCK_SIZE * 2;
+            "baejbeidf3xehfzoocgwqaddxr64ggxzuh5yucgzpzhgv772z4ws552kui4".to_string();
+        let expected_total_bytes = BLOCK_SIZE + 1;
 
         let mut p = Pointer::from(&synthetic_data).unwrap();
         assert_eq!(p.cid(), expected_ptr_cid);
         assert_eq!(p.blocks_len(), 2);
-        
+
         let mut dst_vec: Vec<u8> = vec![];
         let bytes = p.read_to_end(&mut dst_vec).unwrap();
-        
+
         assert_eq!(bytes, expected_total_bytes);
         assert_eq!(dst_vec.len(), expected_total_bytes);
     }
@@ -270,7 +337,7 @@ mod tests {
         // write to block using Writer interface
         let src = [1, 2, 3, 4];
         let expected_block_cid =
-            "baejbeibd5xwwexac5cnvy2gwjzelt67k5ldp7fnwlpw4ctqn3iyloz23ri".to_string();
+            "baejbeie7mstupynzp4jr7k5wwrdss3e3n4badz47wpctk3tmo7ujw2uani".to_string();
 
         let _ = b.write(&src);
 
@@ -284,7 +351,7 @@ mod tests {
         let mut dst = Vec::new();
         let res = b.read_to_end(&mut dst);
         assert!(res.is_ok(), "Error reading from block");
-        assert_eq!(res.unwrap(), BLOCK_SIZE);
+        assert_eq!(res.unwrap(), src.len());
         assert_eq!(dst[0], src[0]);
         assert_eq!(dst[1], src[1]);
         assert_eq!(dst[2], src[2]);
@@ -296,7 +363,7 @@ mod tests {
         let mut original_block = Block::new_empty();
         let src = [1, 2, 3, 4];
         let expected_block_cid =
-            "baejbeibd5xwwexac5cnvy2gwjzelt67k5ldp7fnwlpw4ctqn3iyloz23ri".to_string();
+            "baejbeie7mstupynzp4jr7k5wwrdss3e3n4badz47wpctk3tmo7ujw2uani".to_string();
         let res = original_block.write(&src);
         assert!(res.is_ok(), "Error creating block");
         assert_eq!(original_block.cid, expected_block_cid);
@@ -310,5 +377,42 @@ mod tests {
         let dec_b = enc_b.clone().decrypt(key);
         assert_eq!(original_block.cid, dec_b.cid);
         assert_eq!(original_block.data, dec_b.data);
+    }
+
+    #[test]
+    fn end_to_end() {
+        use serde_cbor::de;
+
+        let file_buffer = std::fs::read(file!()).unwrap();
+
+        // creates pointer for file
+        let pointer = Pointer::from(&file_buffer).unwrap();
+
+        assert!(pointer.blocks_len() > 1);
+
+        // encrypts pointer
+        let key = b"hello darkness my good ol friend";
+        let encrypted_pointer = pointer.clone().encrypt(key).unwrap();
+
+        assert_eq!(pointer.blocks_len(), encrypted_pointer.blocks_len());
+
+        // serialise and deserialise pointer
+        let serial_pointer = serde_cbor::to_vec(&encrypted_pointer).unwrap();
+        let current_pointer: Pointer = de::from_slice(&serial_pointer).unwrap();
+
+        assert_eq!(encrypted_pointer.blocks_len(), current_pointer.blocks_len());
+        assert_eq!(encrypted_pointer.cid(), current_pointer.cid());
+
+        // decrypts pointer
+        let mut decrypted_pointer = current_pointer.decrypt(key).unwrap();
+
+        // compares raw pointer contents to original file (no metadata, etc)
+        let mut final_buffer: Vec<u8> = vec![];
+        decrypted_pointer.read_to_end(&mut final_buffer);
+
+        // final buffer should be the same as intial file buffer after all
+        // the transformations
+        assert_eq!(final_buffer, file_buffer);
+        assert_eq!(final_buffer.len(), file_buffer.len());
     }
 }
