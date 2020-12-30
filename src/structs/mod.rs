@@ -1,15 +1,16 @@
 #![allow(dead_code)]
 #![allow(unused_must_use)]
 
+mod metadata;
+
+use aes_gcm::aead::{generic_array::GenericArray, Aead, NewAead};
+use aes_gcm::Aes256Gcm;
 use cid::{Cid, Version};
 use multihash::{Code, MultihashDigest};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 
-use aes_gcm::aead::{generic_array::GenericArray, Aead, NewAead};
-use aes_gcm::Aes256Gcm;
-
-const BLOCK_SIZE: usize = 256 * 8; // 256 bytes
+const MAX_BLOCK_SIZE: usize = 256 * 8; // 256 bytes
 const SHA256_CODE: u64 = 0x12;
 const NONCE_SIZE_BYTES: usize = 12;
 
@@ -35,7 +36,6 @@ impl Read for Wrapper {
             buf.extend_from_slice(tmp_buf.as_slice());
             count_bytes += bytes;
         }
-
         Ok(count_bytes)
     }
 }
@@ -110,12 +110,12 @@ impl Read for Block {
 
 impl Write for Block {
     fn write(&mut self, buf: &[u8]) -> std::result::Result<usize, std::io::Error> {
-        if buf.len() > BLOCK_SIZE {
+        if buf.len() > MAX_BLOCK_SIZE {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 format!(
                     "Data too large to store by a single block. Max {:?} bytes",
-                    BLOCK_SIZE
+                    MAX_BLOCK_SIZE
                 ),
             ));
         }
@@ -155,8 +155,8 @@ impl Read for Pointer {
 }
 
 impl Pointer {
-    pub fn from(buf: &[u8]) -> Result<Self, cid::Error> {
-        let mut chunker = buf.chunks(BLOCK_SIZE);
+    pub fn from(buf: &[u8]) -> Result<Self, String> {
+        let mut chunker = buf.chunks(MAX_BLOCK_SIZE);
 
         let mut blocks = Vec::<Block>::new();
         let mut concat_block_cids = vec![];
@@ -186,7 +186,7 @@ impl Pointer {
         let h = Code::Sha2_256.digest(&concat_block_cids);
         let cid = match Cid::new(Version::V1, SHA256_CODE, h) {
             Ok(c) => c,
-            Err(e) => return Err(e),
+            Err(e) => return Err(e.to_string()),
         };
 
         let wrapper = Wrapper {
@@ -284,7 +284,7 @@ mod tests {
 
     #[test]
     fn pointer_constructor() {
-        let synthetic_data = [1_u8; BLOCK_SIZE + 1];
+        let synthetic_data = [1_u8; MAX_BLOCK_SIZE + 1];
         let expected_ptr_cid =
             "baejbeidf3xehfzoocgwqaddxr64ggxzuh5yucgzpzhgv772z4ws552kui4".to_string();
 
@@ -295,10 +295,10 @@ mod tests {
 
     #[test]
     fn pointer_read() {
-        let synthetic_data = [1_u8; BLOCK_SIZE + 1];
+        let synthetic_data = [1_u8; MAX_BLOCK_SIZE + 1];
         let expected_ptr_cid =
             "baejbeidf3xehfzoocgwqaddxr64ggxzuh5yucgzpzhgv772z4ws552kui4".to_string();
-        let expected_total_bytes = BLOCK_SIZE + 1;
+        let expected_total_bytes = MAX_BLOCK_SIZE + 1;
 
         let mut p = Pointer::from(&synthetic_data).unwrap();
         assert_eq!(p.cid(), expected_ptr_cid);
@@ -315,7 +315,7 @@ mod tests {
     fn serialization() {
         use serde_cbor::de;
 
-        let synthetic_data = [1_u8; BLOCK_SIZE + 1];
+        let synthetic_data = [1_u8; MAX_BLOCK_SIZE + 1];
         let p = Pointer::from(&synthetic_data).unwrap();
         let serial_p = serde_cbor::to_vec(&p).unwrap();
         let p_deser: Pointer = de::from_slice(&serial_p).unwrap();
@@ -412,7 +412,7 @@ mod tests {
 
         // final buffer should be the same as intial file buffer after all
         // the transformations
-        assert_eq!(final_buffer, file_buffer);
         assert_eq!(final_buffer.len(), file_buffer.len());
+        assert_eq!(final_buffer, file_buffer);
     }
 }
